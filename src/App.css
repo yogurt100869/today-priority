@@ -189,6 +189,15 @@ h2 { font-size: .98rem; margin: 0; }
 .settings-row { display: flex; width: 100%; justify-content: space-between; padding: 15px 14px; border: 0; border-bottom: 1px solid var(--line); background: #fff; color: var(--ink); text-align: left; }
 .settings-row:last-child { border-bottom: 0; }
 .settings-row b { color: var(--indigo); font-size: .75rem; }
+.settings-row span { display: grid; gap: 3px; }
+.settings-row small { color: var(--muted); font-size: .68rem; font-weight: 400; }
+.visually-hidden { position: fixed; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.import-card { padding: 16px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+.import-card p { margin: 5px 0 12px; color: var(--muted); font-size: .8rem; }
+.import-card > div { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 11px; }
+.import-card button { padding: 8px 11px; border: 0; border-radius: 9px; background: var(--indigo-soft); color: var(--indigo); font-weight: 700; }
+.import-card button.danger { background: #fff0f0; color: var(--red); }
+.import-card small { display: block; color: var(--muted); line-height: 1.5; }
 .instruction { padding: 14px; font-size: .84rem; }
 .instruction ol { margin: 8px 0 0; padding-left: 22px; color: var(--muted); line-height: 1.8; }
 .guide-card > div { padding: 13px 14px; border-bottom: 1px solid var(--line); }

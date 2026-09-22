@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { mergeAppData, parseBackup, type AppData } from './backup'
 import {
+  createSafetyBackup,
   deleteCheckIn,
   deleteHabitData,
   getAllData,
+  getLatestSafetyBackup,
   replaceAllData,
   saveCheckIn,
   saveHabit,
@@ -52,6 +55,7 @@ function App() {
   const [checkIns, setCheckIns] = useState<CheckIn[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
+  const [notice, setNotice] = useState<string>()
   const [editingHabit, setEditingHabit] = useState<Habit | null | undefined>()
   const [valueHabit, setValueHabit] = useState<Habit>()
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt>()
@@ -188,6 +192,46 @@ function App() {
     }
   }
 
+  const replaceDataSafely = async (data: AppData, reason: string) => {
+    try {
+      const current = await getAllData()
+      await createSafetyBackup(reason)
+      await replaceAllData(data.habits, data.checkIns)
+      await refresh()
+      try {
+        await Promise.all(current.habits.map((habit) => cancelHabitReminder(habit.id)))
+        await Promise.all(data.habits.map(updateHabitReminder))
+      } catch (cause) {
+        setError(`数据已恢复，但提醒同步失败：${messageFrom(cause)}`)
+      }
+      return true
+    } catch (cause) {
+      setError(messageFrom(cause))
+      return false
+    }
+  }
+
+  const importData = async (imported: AppData, mode: 'merge' | 'replace') => {
+    try {
+      const current = await getAllData()
+      const data = mode === 'merge' ? mergeAppData(current, imported) : imported
+      const saved = await replaceDataSafely(data, mode === 'merge' ? '合并导入前自动备份' : '覆盖导入前自动备份')
+      if (saved) setNotice(`已${mode === 'merge' ? '合并' : '覆盖'}恢复 ${imported.habits.length} 个项目和 ${imported.checkIns.length} 条打卡记录`)
+      return saved
+    } catch (cause) {
+      setError(messageFrom(cause))
+      return false
+    }
+  }
+
+  const resetData = async () => {
+    const saved = await replaceDataSafely(
+      { habits: createStarterHabits(), checkIns: [] },
+      '恢复示例数据前自动备份',
+    )
+    if (saved) setNotice('已恢复示例数据；原数据保存在最近自动备份中')
+  }
+
   if (loading) {
     return <main className="loading"><div className="spinner" /><p>正在准备今日清单…</p></main>
   }
@@ -223,7 +267,8 @@ function App() {
             checkIns={checkIns}
             installPrompt={installPrompt}
             onInstalled={() => setInstallPrompt(undefined)}
-            onReset={() => void run(() => replaceAllData(createStarterHabits()))}
+            onImport={importData}
+            onReset={resetData}
             onError={(cause) => setError(messageFrom(cause))}
           />
         )}
@@ -257,6 +302,7 @@ function App() {
         />
       )}
       {error && <Toast message={error} onClose={() => setError(undefined)} />}
+      {notice && <Toast message={notice} onClose={() => setNotice(undefined)} />}
     </div>
   )
 }
@@ -436,11 +482,24 @@ function HabitForm({ habit, onClose, onSave }: { habit: Habit | null; onClose: (
     isArchived: false,
     createdAt: new Date().toISOString(),
   })
+  const [targetValue, setTargetValue] = useState(() => String(habit?.targetValue ?? 1))
+  const [targetCount, setTargetCount] = useState(() => String(habit?.targetCount ?? 1))
+  const [intervalDays, setIntervalDays] = useState(() => String(habit?.intervalDays ?? 1))
 
   const update = <K extends keyof Habit>(key: K, value: Habit[K]) => setDraft((current) => ({ ...current, [key]: value }))
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    void onSave({ ...draft, title: draft.title.trim() })
+    void onSave({
+      ...draft,
+      title: draft.title.trim(),
+      targetValue: draft.trackingType === '数值' || draft.trackingType === '时长'
+        ? Number(targetValue)
+        : draft.targetValue,
+      targetCount: draft.trackingType === '数值' || draft.trackingType === '时长'
+        ? draft.targetCount
+        : Number(targetCount),
+      intervalDays: draft.scheduleUnit === '自定义间隔' ? Number(intervalDays) : draft.intervalDays,
+    })
   }
 
   return (
@@ -466,13 +525,13 @@ function HabitForm({ habit, onClose, onSave }: { habit: Habit | null; onClose: (
         </div>
         {(draft.trackingType === '数值' || draft.trackingType === '时长') ? (
           <div className="form-grid">
-            <label>目标值<input type="number" min="0.1" step="any" value={draft.targetValue} onChange={(event) => update('targetValue', Number(event.target.value))} /></label>
+            <label>目标值<input required type="number" min="0.1" step="any" value={targetValue} onChange={(event) => setTargetValue(event.target.value)} /></label>
             <label>单位<input value={draft.valueUnit} onChange={(event) => update('valueUnit', event.target.value)} placeholder="ml、分钟…" /></label>
           </div>
         ) : (
-          <label>每周期次数<input type="number" min="1" max="30" value={draft.targetCount} onChange={(event) => update('targetCount', Number(event.target.value))} /></label>
+          <label>每周期次数<input required type="number" min="1" max="30" value={targetCount} onChange={(event) => setTargetCount(event.target.value)} /></label>
         )}
-        {draft.scheduleUnit === '自定义间隔' && <label>间隔天数<input type="number" min="1" max="365" value={draft.intervalDays} onChange={(event) => update('intervalDays', Number(event.target.value))} /></label>}
+        {draft.scheduleUnit === '自定义间隔' && <label>间隔天数<input required type="number" min="1" max="365" value={intervalDays} onChange={(event) => setIntervalDays(event.target.value)} /></label>}
         {(draft.scheduleUnit === '每半年' || draft.scheduleUnit === '每年') && <label>下次到期<input type="date" value={draft.nextDueDate ?? ''} onChange={(event) => update('nextDueDate', event.target.value)} /></label>}
         <label className="toggle-row"><span>启用提醒时间</span><input type="checkbox" checked={draft.reminderEnabled} onChange={(event) => update('reminderEnabled', event.target.checked)} /></label>
         {draft.reminderEnabled && <label>提醒时间<input type="time" value={draft.reminderTime} onChange={(event) => update('reminderTime', event.target.value)} /></label>}
@@ -485,12 +544,13 @@ function HabitForm({ habit, onClose, onSave }: { habit: Habit | null; onClose: (
 }
 
 function ValueDialog({ habit, currentValue, onClose, onSave }: { habit: Habit; currentValue: number; onClose: () => void; onSave: (value: number) => void }) {
-  const [value, setValue] = useState(habit.targetValue ?? 1)
+  const [value, setValue] = useState(() => String(habit.targetValue ?? 1))
+  const numericValue = Number(value)
   return (
     <Modal title={`记录${habit.title}`} onClose={onClose} compact>
       <p className="dialog-hint">当前已记录 {formatNumber(currentValue)} {habit.valueUnit}</p>
-      <div className="value-input"><input autoFocus type="number" min="0.1" step="any" value={value} onChange={(event) => setValue(Number(event.target.value))} /><span>{habit.valueUnit}</span></div>
-      <button className="primary-button" disabled={value <= 0} onClick={() => onSave(value)}>保存进度</button>
+      <div className="value-input"><input autoFocus type="number" min="0.1" step="any" value={value} onChange={(event) => setValue(event.target.value)} /><span>{habit.valueUnit}</span></div>
+      <button className="primary-button" disabled={!value || !Number.isFinite(numericValue) || numericValue <= 0} onClick={() => onSave(numericValue)}>保存进度</button>
     </Modal>
   )
 }
@@ -541,6 +601,7 @@ function SettingsPage({
   checkIns,
   installPrompt,
   onInstalled,
+  onImport,
   onReset,
   onError,
 }: {
@@ -548,11 +609,15 @@ function SettingsPage({
   checkIns: CheckIn[]
   installPrompt?: InstallPrompt
   onInstalled: () => void
-  onReset: () => void
+  onImport: (data: AppData, mode: 'merge' | 'replace') => Promise<boolean>
+  onReset: () => Promise<void>
   onError: (cause: unknown) => void
 }) {
   const [showGuide, setShowGuide] = useState(false)
   const [showPrivacy, setShowPrivacy] = useState(false)
+  const [importedData, setImportedData] = useState<AppData>()
+  const [latestBackup, setLatestBackup] = useState<Awaited<ReturnType<typeof getLatestSafetyBackup>>>()
+  const fileInput = useRef<HTMLInputElement>(null)
   const [notificationStatus, setNotificationStatus] = useState<string>(
     isNativeApp ? 'prompt' : 'Notification' in window ? Notification.permission : 'unsupported',
   )
@@ -569,6 +634,42 @@ function SettingsPage({
     } catch (cause) {
       onError(cause)
     }
+  }
+  useEffect(() => {
+    getLatestSafetyBackup().then(setLatestBackup).catch(onError)
+  }, [])
+  const selectBackup = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (file.size > 10 * 1024 * 1024) {
+      onError(new Error('备份文件超过 10 MB，无法导入'))
+      return
+    }
+    try {
+      const parsed = parseBackup(await file.text())
+      setImportedData({ habits: parsed.habits, checkIns: parsed.checkIns })
+    } catch (cause) {
+      onError(cause)
+    }
+  }
+  const importWithMode = async (mode: 'merge' | 'replace') => {
+    if (!importedData) return
+    if (mode === 'replace' && !window.confirm('覆盖恢复会替换当前全部项目和打卡记录。系统会先自动备份当前数据，是否继续？')) return
+    if (await onImport(importedData, mode)) {
+      setImportedData(undefined)
+      setLatestBackup(await getLatestSafetyBackup())
+    }
+  }
+  const restoreSafetyBackup = async () => {
+    if (!latestBackup || !window.confirm(`恢复 ${formatDateTime(latestBackup.createdAt)} 的自动备份？当前数据会先再次备份。`)) return
+    if (await onImport(latestBackup.data, 'replace')) {
+      setLatestBackup(await getLatestSafetyBackup())
+    }
+  }
+  const resetToStarterData = async () => {
+    await onReset()
+    setLatestBackup(await getLatestSafetyBackup())
   }
   return (
     <>
@@ -602,11 +703,24 @@ function SettingsPage({
         <button className="settings-row" onClick={() => setShowGuide(!showGuide)}><span>每日饮食与健康指南</span><b>{showGuide ? '收起' : '查看'}</b></button>
         <button className="settings-row" onClick={() => setShowPrivacy(!showPrivacy)}><span>隐私政策</span><b>{showPrivacy ? '收起' : '查看'}</b></button>
         <button className="settings-row" onClick={() => void exportData()}><span>导出个人数据</span><b>{isNativeApp ? '分享' : 'JSON'}</b></button>
-        <button className="settings-row danger-text" onClick={() => { if (window.confirm('恢复示例数据将清除当前所有记录，是否继续？')) onReset() }}><span>恢复示例数据</span><b>重置</b></button>
+        <button className="settings-row" onClick={() => fileInput.current?.click()}><span>导入数据备份</span><b>选择 JSON</b></button>
+        <input ref={fileInput} className="visually-hidden" type="file" accept=".json,application/json" onChange={(event) => void selectBackup(event)} />
+        {latestBackup && <button className="settings-row" onClick={() => void restoreSafetyBackup()}><span>恢复最近自动备份<small>{formatDateTime(latestBackup.createdAt)} · {latestBackup.reason}</small></span><b>恢复</b></button>}
+        <button className="settings-row danger-text" onClick={() => { if (window.confirm('恢复示例数据将替换当前所有记录。系统会先自动备份当前数据，是否继续？')) void resetToStarterData() }}><span>恢复示例数据</span><b>重置</b></button>
       </section>
+      {importedData && <section className="import-card">
+        <b>备份读取成功</b>
+        <p>{importedData.habits.length} 个项目，{importedData.checkIns.length} 条打卡记录</p>
+        <div>
+          <button onClick={() => void importWithMode('merge')}>合并导入</button>
+          <button className="danger" onClick={() => void importWithMode('replace')}>覆盖恢复</button>
+          <button onClick={() => setImportedData(undefined)}>取消</button>
+        </div>
+        <small>合并导入会保留当前数据；相同记录以备份文件为准。覆盖恢复会先自动备份当前数据，再完整替换。</small>
+      </section>}
       {showGuide && <Guidance />}
       {showPrivacy && <PrivacyPolicy />}
-      <section className="privacy-card"><b>本地优先</b><p>{isNativeApp ? '数据保存在此 iPhone 的应用私有空间，不会上传服务器。删除 App 会删除本地记录，请定期导出备份。' : '数据保存在此浏览器的 IndexedDB 中，不会上传服务器。清除网站数据会删除记录，请定期导出备份。'}</p></section>
+      <section className="privacy-card"><b>本地优先</b><p>{isNativeApp ? '数据保存在此 iPhone 的应用私有空间，不会上传服务器。更新不会清除记录；删除 App 仍会删除数据，请定期导出 JSON 备份。' : '数据保存在此浏览器的 IndexedDB 中，不会上传服务器。更新不会清除记录；清除网站数据仍会删除数据，请定期导出 JSON 备份。'}</p></section>
       <section className="health-note"><b>健康提示</b><p>本应用仅用于习惯提醒和个人记录，不提供诊断或治疗建议。检查频率、药物和补充剂使用请以医生建议为准。</p></section>
     </>
   )
@@ -629,7 +743,7 @@ function PrivacyPolicy() {
     <div><b>数据收集</b><p>今日优先不要求账户，不收集姓名、邮箱、设备标识符、位置或广告数据。</p></div>
     <div><b>健康与打卡数据</b><p>计划、打卡和备注仅保存在设备的应用私有空间，不会上传至开发者或第三方服务器。</p></div>
     <div><b>通知</b><p>通知仅在用户授权后由设备本地调度，不会将打卡内容发送给推送服务器。</p></div>
-    <div><b>导出与删除</b><p>数据仅在用户主动导出时通过系统分享菜单交给用户选择的目标。删除 App 会删除其本地数据。</p></div>
+    <div><b>导入、导出与删除</b><p>备份文件仅在用户主动导入或导出时由设备本地处理，不会上传服务器。删除 App 会删除其本地数据。</p></div>
     <div><b>医疗声明</b><p>本应用只提供提醒和个人记录，不提供医疗诊断、处方或治疗建议。</p></div>
   </section>
 }
@@ -667,6 +781,15 @@ function Toast({ message, onClose }: { message: string; onClose: () => void }) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(value)
+}
+
+function formatDateTime(value: string) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value))
 }
 
 function messageFrom(cause: unknown) {

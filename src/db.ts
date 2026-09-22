@@ -1,14 +1,17 @@
 import { Capacitor } from '@capacitor/core'
 import { Preferences } from '@capacitor/preferences'
 import { openDB } from 'idb'
+import type { AppData } from './backup'
 import type { BenefitArea, CheckIn, Habit } from './types'
 
-interface AppData {
-  habits: Habit[]
-  checkIns: CheckIn[]
+export interface SafetyBackup {
+  data: AppData
+  createdAt: string
+  reason: string
 }
 
 const nativeDataKey = 'habit-priority-data-v1'
+const nativeBackupKey = 'habit-priority-safety-backup-v1'
 const deprecatedStarterHashes = new Set([
   21_947_730,
   631_291_826,
@@ -42,12 +45,19 @@ function inferLegacyBenefits(habit: Habit): BenefitArea[] {
   return legacyBenefits[habit.category ?? ''] ?? habit.benefitAreas ?? ['身体健康']
 }
 
-const database = openDB('habit-priority', 1, {
+const database = openDB('habit-priority', 2, {
   upgrade(db) {
-    const habits = db.createObjectStore('habits', { keyPath: 'id' })
-    habits.createIndex('createdAt', 'createdAt')
-    const checkIns = db.createObjectStore('checkIns', { keyPath: 'id' })
-    checkIns.createIndex('habitId', 'habitId')
+    if (!db.objectStoreNames.contains('habits')) {
+      const habits = db.createObjectStore('habits', { keyPath: 'id' })
+      habits.createIndex('createdAt', 'createdAt')
+    }
+    if (!db.objectStoreNames.contains('checkIns')) {
+      const checkIns = db.createObjectStore('checkIns', { keyPath: 'id' })
+      checkIns.createIndex('habitId', 'habitId')
+    }
+    if (!db.objectStoreNames.contains('backups')) {
+      db.createObjectStore('backups')
+    }
   },
 })
 
@@ -75,6 +85,9 @@ export async function getAllData() {
   const removed = migratedHabits.filter((habit) => !habits.includes(habit))
   const storedById = new Map(storedHabits.map((habit) => [habit.id, habit]))
   const migrated = habits.filter((habit) => storedById.get(habit.id)?.benefitSchemaVersion !== 2)
+  if ((migrated.length || removed.length) && (storedHabits.length || checkIns.length)) {
+    await writeSafetyBackup({ habits: storedHabits, checkIns }, '数据升级前自动备份')
+  }
   await Promise.all(migrated.map((habit) => db.put('habits', habit)))
   await Promise.all(removed.map((habit) => db.delete('habits', habit.id)))
   return { habits, checkIns }
@@ -148,6 +161,22 @@ export async function replaceAllData(habits: Habit[], checkIns: CheckIn[] = []) 
   await transaction.done
 }
 
+export async function createSafetyBackup(reason: string) {
+  const data = await getAllData()
+  if (!data.habits.length && !data.checkIns.length) return
+  await writeSafetyBackup(data, reason)
+}
+
+export async function getLatestSafetyBackup(): Promise<SafetyBackup | undefined> {
+  if (Capacitor.isNativePlatform()) {
+    const { value } = await Preferences.get({ key: nativeBackupKey })
+    if (!value) return undefined
+    const parsed: unknown = JSON.parse(value)
+    return isSafetyBackup(parsed) ? parsed : undefined
+  }
+  return (await database).get('backups', 'latest') as Promise<SafetyBackup | undefined>
+}
+
 async function readNativeData(): Promise<AppData> {
   const { value } = await Preferences.get({ key: nativeDataKey })
   if (!value) return { habits: [], checkIns: [] }
@@ -157,6 +186,7 @@ async function readNativeData(): Promise<AppData> {
   }
   const sanitized = removeDeprecatedUnusedStarters(parsed)
   if (sanitized.habits.length !== parsed.habits.length) {
+    await writeSafetyBackup(parsed, '数据升级前自动备份')
     await writeNativeData(sanitized)
   }
   return sanitized
@@ -166,10 +196,25 @@ async function writeNativeData(data: AppData) {
   await Preferences.set({ key: nativeDataKey, value: JSON.stringify(data) })
 }
 
+async function writeSafetyBackup(data: AppData, reason: string) {
+  const backup: SafetyBackup = { data, reason, createdAt: new Date().toISOString() }
+  if (Capacitor.isNativePlatform()) {
+    await Preferences.set({ key: nativeBackupKey, value: JSON.stringify(backup) })
+    return
+  }
+  await (await database).put('backups', backup, 'latest')
+}
+
 function isAppData(value: unknown): value is AppData {
   if (!value || typeof value !== 'object') return false
   const candidate = value as Partial<AppData>
   return Array.isArray(candidate.habits) && Array.isArray(candidate.checkIns)
+}
+
+function isSafetyBackup(value: unknown): value is SafetyBackup {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<SafetyBackup>
+  return isAppData(candidate.data) && typeof candidate.createdAt === 'string' && typeof candidate.reason === 'string'
 }
 
 function removeDeprecatedUnusedStarters(data: AppData): AppData {

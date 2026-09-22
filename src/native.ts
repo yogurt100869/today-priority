@@ -3,6 +3,7 @@ import { Directory, Encoding, Filesystem } from '@capacitor/filesystem'
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics'
 import { LocalNotifications, type Schedule } from '@capacitor/local-notifications'
 import { Share } from '@capacitor/share'
+import { createBackupPayload } from './backup'
 import type { CheckIn, Habit } from './types'
 
 export const isNativeApp = Capacitor.isNativePlatform()
@@ -54,12 +55,7 @@ export async function requestNativeNotificationPermission() {
 }
 
 export async function exportAndShareData(habits: Habit[], checkIns: CheckIn[]) {
-  const payload = JSON.stringify({
-    exportedAt: new Date().toISOString(),
-    appId: 'com.yogurt100869.habitpriority',
-    habits,
-    checkIns,
-  }, null, 2)
+  const payload = JSON.stringify(createBackupPayload({ habits, checkIns }), null, 2)
 
   if (!isNativeApp) {
     const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }))
